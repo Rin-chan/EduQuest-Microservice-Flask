@@ -20,14 +20,15 @@ class LLM:
             temperature=temperature,
         )
 
-    def generate_questions_and_answers(self, document_content, num_questions, difficulty):
+    def generate_questions_and_answers(self, document_content, num_questions, difficulty, short_answer):
         prompt = PromptTemplate(
             template="You are a helpful learning assistant for students. Your goal is to facilitate their learning by "
                      "testing their understanding of the content from a lecture note. Based on the provided lecture "
                      "document, generate {num_questions} questions. Ensure that these questions are of {difficulty} "
                      "difficulty. A question should include a list of 4 answers, and each answer has an indication "
                      "whether it is a correct answer and a reason to justify why this answer is correct or incorrect. "
-                     "This is a multi select question and there can be more than one correct answer. "
+                     "If {short_answer} is true, at least 30% of the questions should be short-answer questions that require a free-text response."
+                     "Otherwise, all of the questions should be a multi select question and there can be more than one correct answer. "
                      "The possible answers does not have to be solely from the content of the document. You may also "
                      "generate other possible answers depending on the difficulty level.\n\n"
                      "ADDITIONAL REQUIREMENTS:\n"
@@ -52,7 +53,7 @@ class LLM:
                      "Always include the standard 4-answer list for compatibility.\n"
                      "{format_instructions} \n\n"
                      "Below is the content of the lecture document:\n\n{document_content}",
-            input_variables=["num_questions", "difficulty", "document_content"],
+            input_variables=["num_questions", "difficulty", "document_content", "short_answer"],
             partial_variables={"format_instructions": parser.get_format_instructions()}
         )
 
@@ -61,7 +62,8 @@ class LLM:
         result = chain.invoke({
             "num_questions": num_questions,
             "difficulty": difficulty,
-            "document_content": document_content
+            "document_content": document_content,
+            "short_answer": short_answer
         })
 
         try:
@@ -70,7 +72,10 @@ class LLM:
                 hint = question.get("hint")
                 if hint:
                     continue
+
+                print(question)
                 question_type = question.get("question_type", "mcq")
+                print(question_type)
                 if question_type == "matching":
                     question["hint"] = "Match each pair based on the core definitions."
                 elif question_type == "categorising":

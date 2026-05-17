@@ -38,8 +38,10 @@ def generate_questions_from_document():
         questions = llm.generate_questions_and_answers(
             document_content=document_content,
             num_questions=request.json['num_questions'],
-            difficulty=request.json['difficulty']
+            difficulty=request.json['difficulty'],
+            short_answer=request.json['short_answer']
         )
+        print(request.json['short_answer'])
     except Exception as e:
         return jsonify({"error generating questions": str(e)}), 500
 
