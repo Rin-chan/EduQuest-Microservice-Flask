@@ -470,7 +470,6 @@ class LLM:
         Returns (score:int, breakdown:list).
         """
 
-        print("generate score answer")
         evidence = []
         if is_math_question:
             for c in claims:
@@ -483,7 +482,11 @@ class LLM:
                     'wolfram': wolfram_out,
                 })
         else:
-            for c in claims:
+            non_math_claims = claims or [{
+                'statement': student_answer or '',
+                'type': 'answer',
+            }]
+            for c in non_math_claims:
                 stmt = c.get('statement')
                 evidence.append({
                     'statement': stmt,
@@ -492,7 +495,6 @@ class LLM:
                     'wolfram': 'SKIPPED (non-math question)',
                 })
 
-        print("HERE1")
         # LLM-driven scoring: provide a strict prompt that requires the model to
         # evaluate the Question and Student answer while using the Wolfram evidence
         # as guidance. The model must return strict JSON with score and breakdown.
@@ -519,11 +521,10 @@ class LLM:
             - Low credit (1): verified AND the student answer or methods_used contains an incorrect/contradictory method keyword (squeeze, squeeze theorem, bounded). Reason must cite the incorrect keyword.
             - Otherwise: verified but missing clear justification => points=2 and reason="verified but missing clear justification".
 
-            3) If is_math_question is false, use a general rubric:
-            - Excellent answer (8-10): correct, complete, directly answers the question, and uses clear reasoning or accurate terminology.
-            - Good answer (5-7): mostly correct, with minor omissions or slightly incomplete justification.
-            - Partial answer (2-4): attempts the question but has significant gaps, errors, or missing key details.
-            - Incorrect/irrelevant answer (0-1): does not answer the question correctly or is off-topic.
+            3) If is_math_question is false, use a generic marking scheme:     
+            - 10: includes correct expected result AND correct program action (explicit or implicit acceptable, does not have to be exact to the expected answer)
+            - 8: correct expected result OR correct action, missing one part
+            - 0–5: incorrect logic or missing key step
 
             4) Do NOT assign >0 points for unverified math claims when is_math_question is true.
             5) Sum per-claim points and cap at 10; return integer score.
@@ -558,6 +559,15 @@ class LLM:
             Student answer: "A linked list is a linear data structure where each element points to the next."
             Output JSON: {{"score": 9, "max_score": 10, "breakdown": [{{"statement":"A linked list is a linear data structure","verified":true,"wolfram":"SKIPPED (non-math question)","points":9,"reason":"correct and clearly explained"}}]}}
 
+            Example 5 - Boolean evaluation and program action:
+            Input:
+            Question:
+            If distance = 7, evaluate the condition distance > 3 and state what the program should do.
+            Expected answer: `dist = 7`; since `7 > 3` is True, the condition evaluates to True, so the program should suggest booking a taxi. Accept equivalent wording such as 'display 7 and branch to suggest a taxi.'
+            Student answer:
+            distance > 3 is True, so the program suggests booking a taxi.
+            Output JSON: {{"score": 10, "max_score": 10, "breakdown": [{{"statement": "distance > 3 is True and the program suggests booking a taxi","verified": true,"wolfram": "SKIPPED (non-math question)","points": 10,"reason": "all required semantic components present: correct boolean evaluation and correct program action"}}]}}
+            
             Now produce the JSON result for the following inputs. Follow the rules and examples exactly.
 
             Is math question: {is_math_question}
@@ -582,7 +592,6 @@ class LLM:
             'evidence': json.dumps(evidence)
         })
 
-        print("HERE2")
         # Validate LLM output and enforce hard guards for obvious rule violations.
         score = parsed.get('score', 0)
         breakdown = parsed.get('breakdown', []) or []
@@ -708,7 +717,6 @@ class LLM:
         if score != final_score:
             score = final_score
 
-        print("score done")
         return int(score), breakdown
     
     def generate_mathematical_claims(self, question, expected_answer, student_answer):
@@ -749,7 +757,7 @@ class LLM:
         )
 
 
-        chain = prompt | self.model | JsonOutputParser()
+        chain = prompt | self.scoring_model | JsonOutputParser()
 
         result = chain.invoke({
             "question": question,

@@ -146,16 +146,31 @@ def generate_short_ans_score():
 
         result = llm.generate_mathematical_claims(question, expected_answer, student_answer)
 
-        is_math_question = result.get("is_math_question", False) or detect_math_question(
+        combined_text = " ".join([question or "", expected_answer or "", student_answer or ""]).lower()
+        programming_keywords = [
+            "program",
+            "pseudocode",
+            "if statement",
+            "if condition",
+            "boolean",
+            "true",
+            "false",
+            "print",
+            "return",
+            "display",
+        ]
+        is_programming_question = any(keyword in combined_text for keyword in programming_keywords)
+        is_math_question = (
+            not is_programming_question
+            and (
+                result.get("is_math_question", False) or detect_math_question(
             question, expected_answer=expected_answer, student_answer=student_answer
+                )
+            )
         )
 
         claims = result.get("claims", [])
         methods_used = result.get("methods_used", [])
-
-        print(is_math_question)
-        print(claims)
-        print(methods_used)
         score, breakdown = llm.generate_score_answer(
             claims=claims,
             question=question,
@@ -164,12 +179,6 @@ def generate_short_ans_score():
             student_answer=student_answer,
             is_math_question=is_math_question,
         )
-
-        print("\nFINAL SCORE:", score)
-        print("BREAKDOWN:")
-        for b in breakdown:
-            print(b)
-        # Return structured JSON so Flask makes a proper response body
         return jsonify({"score": int(score), "breakdown": breakdown})
     except Exception as e:
         return jsonify({"error generating short answer score": str(e)}), 500

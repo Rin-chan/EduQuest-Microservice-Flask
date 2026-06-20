@@ -127,29 +127,22 @@ def normalize_and_compute(statement: str):
         if expr.count('(') < expr.count(')'):
             expr = '(' + expr
         try:
-            print(f"[NORMALIZE] detected limit var={var} point={point} expr={expr}", flush=True)
             sym_var = sp.symbols(var)
             sym_expr = parse_expr(expr, transformations=transforms)
-            print(f"[NORMALIZE] parsed sym_expr={sym_expr}", flush=True)
             # attempt simplification/cancellation to remove removable singularities
             try:
                 simp = sp.simplify(sym_expr)
-                print(f"[NORMALIZE] simplified to {simp}", flush=True)
             except Exception as e:
-                print(f"[NORMALIZE] simplify error: {e}", flush=True)
                 simp = sym_expr
             try:
                 val = sp.limit(simp, sym_var, parse_expr(point, transformations=transforms))
             except Exception as e:
-                print(f"[NORMALIZE] limit(simp) failed: {e}", flush=True)
                 val = sp.limit(sym_expr, sym_var, parse_expr(point, transformations=transforms))
             try:
                 return float(val), expr
             except Exception as e:
-                print(f"[NORMALIZE] float(val) failed: {e}", flush=True)
                 return None, expr
         except Exception as e:
-            print(f"[NORMALIZE] parse/limit error: {e}", flush=True)
             return None, None
 
     # Fallback: try to evaluate as equation 'expr = num'
@@ -240,9 +233,6 @@ def verify_claim(statement: str, expected=None):
     # fallback to Wolfram
     wolfram_input = normalized_input or stmt_no_eq or statement
     wolfram_output = wolfram_compute(wolfram_input)
-
-    print("\nWOLFRAM INPUT:", wolfram_input)
-    print("WOLFRAM OUTPUT:", wolfram_output)
 
     # If Wolfram explicitly failed to understand the input, treat as unverified
     if not wolfram_output:
