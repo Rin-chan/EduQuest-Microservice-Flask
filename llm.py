@@ -499,77 +499,27 @@ class LLM:
         # evaluate the Question and Student answer while using the Wolfram evidence
         # as guidance. The model must return strict JSON with score and breakdown.
         score_prompt = PromptTemplate.from_template("""
-            You are a strict grader LLM. Evaluate the student answer for the given
-            Question and Expected answer. Use the provided per-claim evidence as guidance.
-            If is_math_question is true, use the math-specific scoring rules and verification
-            guidance. If is_math_question is false, skip Wolfram and evaluate using a general
-            non-math rubric based on correctness, relevance, completeness, and clarity.
+            You are a strict grader.
 
-            Return STRICT JSON with keys:
-            - score: integer between 0 and 10 (total points, capped at 10)
-            - max_score: 10
-            - breakdown: list of objects with keys: statement (string), verified (bool), wolfram (string), points (int 0-10), reason (string)
+            Use the verified claims as factual evidence.
 
-            Scoring rules you MUST follow exactly (these are normative; apply in order):
-            1) If is_math_question is true and every claim in evidence has verified==false,
-            set score=0 and give each claim points=0 and reason="unverified".
+            If is_math_question, math questions:
+            - Correctness is most important.
+            - Mathematical justification should increase the score.
+            - Missing justification should reduce the score.
+            - Incorrect reasoning should reduce the score.
+            - A correct final answer with no explanation should receive partial credit.
 
-            2) If is_math_question is true, for each claim with verified==true, assign per-claim points according to this deterministic mapping:
-            - Full credit (10): verified AND the student answer OR methods_used mentions one or more STRICT keywords: polynomial, polynomials, continuous, continuity. Reason must cite the keyword.
-            - High credit (6): verified AND the student answer OR methods_used mentions concrete justification keywords: direct substitution, substitute, substitution, term by term (or synonyms). Reason must cite the keyword.
-            - Medium credit (4): verified AND the student answer is numeric-only or a terse calculation without naming principles. Reason must say "numeric-only" or "calculation only".
-            - Low credit (1): verified AND the student answer or methods_used contains an incorrect/contradictory method keyword (squeeze, squeeze theorem, bounded). Reason must cite the incorrect keyword.
-            - Otherwise: verified but missing clear justification => points=2 and reason="verified but missing clear justification".
+            If not is_math_question, non-math questions:
+            - Evaluate correctness, completeness, relevance, and clarity.
 
-            3) If is_math_question is false, use a generic marking scheme:     
-            - 10: includes correct expected result AND correct program action (explicit or implicit acceptable, does not have to be exact to the expected answer)
-            - 8: correct expected result OR correct action, missing one part
-            - 0–5: incorrect logic or missing key step
-
-            4) Do NOT assign >0 points for unverified math claims when is_math_question is true.
-            5) Sum per-claim points and cap at 10; return integer score.
-            6) Do NOT invent rules or fractional points. Do not return any extra keys.
-
-            Examples (follow these exact output formats):
-
-            Example 1 - full credit:
-            Input:
-            Question: Evaluate limit...
-            Per-claim evidence: [{{"statement":"lim...=39","verified":true,"wolfram":"LOCAL COMPUTE: 39"}}]
-            Student answer: "39. Polynomials are continuous"
-            Output JSON: {{"score": 10, "max_score": 10, "breakdown": [{{"statement":"lim...=39","verified":true,"wolfram":"LOCAL COMPUTE: 39","points":10,"reason":"verified + strict keyword: polynomial"}}]}}
-
-            Example 2 - unverified:
-            Input:
-            Per-claim evidence: [{{"statement":"lim...=5","verified":false,"wolfram":"could not understand"}}]
-            Student answer: "5"
-            Output JSON: {{"score": 0, "max_score": 10, "breakdown": [{{"statement":"lim...=5","verified":false,"wolfram":"could not understand","points":0,"reason":"unverified"}}]}}
-
-            Example 3 - incorrect method (low credit):
-            Input:
-            Question: Evaluate limit...
-            Per-claim evidence: [{{"statement":"lim...=39","verified":true,"wolfram":"LOCAL COMPUTE: 39"}}]
-            Student answer: "39 using squeeze theorem"
-            Output JSON: {{"score": 1, "max_score": 10, "breakdown": [{{"statement":"lim...=39","verified":true,"wolfram":"LOCAL COMPUTE: 39","points":1,"reason":"verified but uses incorrect method: squeeze theorem"}}]}}
-
-            Example 4 - non-math answer:
-            Input:
-            Question: What is a linked list?
-            Per-claim evidence: [{{"statement":"A linked list is a linear data structure","verified":true,"wolfram":"SKIPPED (non-math question)"}}]
-            Student answer: "A linked list is a linear data structure where each element points to the next."
-            Output JSON: {{"score": 9, "max_score": 10, "breakdown": [{{"statement":"A linked list is a linear data structure","verified":true,"wolfram":"SKIPPED (non-math question)","points":9,"reason":"correct and clearly explained"}}]}}
-
-            Example 5 - Boolean evaluation and program action:
-            Input:
-            Question:
-            If distance = 7, evaluate the condition distance > 3 and state what the program should do.
-            Expected answer: `dist = 7`; since `7 > 3` is True, the condition evaluates to True, so the program should suggest booking a taxi. Accept equivalent wording such as 'display 7 and branch to suggest a taxi.'
-            Student answer:
-            distance > 3 is True, so the program suggests booking a taxi.
-            Output JSON: {{"score": 10, "max_score": 10, "breakdown": [{{"statement": "distance > 3 is True and the program suggests booking a taxi","verified": true,"wolfram": "SKIPPED (non-math question)","points": 10,"reason": "all required semantic components present: correct boolean evaluation and correct program action"}}]}}
-            
-            Now produce the JSON result for the following inputs. Follow the rules and examples exactly.
-
+            Return:
+            {{
+            "score": 0-10,
+            "max_score": 10,
+            "breakdown": [...]
+            }}
+                                                    
             Is math question: {is_math_question}
             Question: {question}
             Expected answer: {expected_answer}
@@ -594,6 +544,7 @@ class LLM:
 
         # Validate LLM output and enforce hard guards for obvious rule violations.
         score = parsed.get('score', 0)
+        print("[Generate Score Answer] RAW SCORE:", parsed.get("score"))
         breakdown = parsed.get('breakdown', []) or []
 
         # Normalize and validate types
@@ -623,11 +574,20 @@ class LLM:
                     breakdown[i]['points'] = 0
                     breakdown[i]['reason'] = 'unverified (enforced)'
 
-        # Validator: enforce point ranges based on keywords in student's answer.
-        # Allow LLM flexibility within these ranges, but enforce minimum/maximum bounds.
         strict_kw = [k.lower() for k in ['polynomial', 'polynomials', 'continuous', 'continuity']]
-        # 'limit laws' alone is not sufficient for High credit; require concrete phrases.
-        general_kw = [k.lower() for k in ['direct substitution', 'directly substitute', 'substitute', 'substitution', 'term by term', 'term-by-term']]
+        general_kw = [k.lower() for k in [
+            'direct substitution',
+            'directly substitute',
+            'substitute',
+            'substitution',
+            'term by term',
+            'sum law',
+            'difference law',
+            'power law',
+            'constant multiple law',
+            'limit law',
+            'limit laws'
+        ]]
         plug_in_kw = [k.lower() for k in ['plug in', 'plugging in', 'plugging', 'plugged in']]
         incorrect_kw = [k.lower() for k in ['squeeze', 'squeeze theorem', 'bounded']]
         methods_text = (student_answer or '').lower()
@@ -692,30 +652,19 @@ class LLM:
                 old_reason = breakdown[i].get('reason', '')
                 breakdown[i]['reason'] = f"{old_reason} (validator range: [{min_allowed}, {max_allowed}])"
 
-        # Recompute total and cap at 10
-        total = 0
-        for b in breakdown:
-            try:
-                p = int(b.get('points', 0))
-            except Exception:
-                p = 0
-            if p < 0:
-                p = 0
-            if p > 10:
-                p = 10
-            if b.get('verified') and p == 0:
-                # Never give verified math claims zero points after validation.
-                p = 1
-                old_reason = b.get('reason', '')
-                b['reason'] = f"{old_reason} (validator: verified claim minimum 1 point)".strip()
-            b['points'] = p
-            total += p
+        # Only enforce score=0 if nothing verified
+        if is_math_question:
+            any_verified = any(
+                ev.get("verified", False)
+                for ev in evidence
+            )
 
-        final_score = int(min(10, total))
+            if not any_verified:
+                score = 0
 
-        # If LLM returned a wildly inconsistent score, prefer validated final_score
-        if score != final_score:
-            score = final_score
+        # Clamp to valid range
+        score = max(0, min(10, int(score)))
+        print(f"[Generate Score Answer] Actual Score:{score}")
 
         return int(score), breakdown
     

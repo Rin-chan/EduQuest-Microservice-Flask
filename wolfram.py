@@ -51,7 +51,7 @@ def wolfram_compute(expr: str):
         f"?appid={app_id}&input={expr}"
     )
 
-    r = requests.get(url, timeout=20)
+    r = requests.get(url, timeout=30)
     return r.text.strip()
 
 def normalize_number(x):
@@ -184,26 +184,51 @@ def verify_claim(statement: str, expected=None):
     # Strip trailing '= number' from statement before normalization (e.g. '\lim...)=39')
     stmt_no_eq = re.sub(r"\s*=\s*-?\d+\.?\d*\s*$", "", statement)
 
-    # QUICK CHECK: if statement is an algebraic equality like 'A = B', verify
-    # by symbolic simplification (lhs - rhs == 0). This handles factorization
-    # and simplification claims that don't state numeric results.
-    if '=' in stmt_no_eq:
+    # --------------------------------------------------
+    # Symbolic equality verification
+    # --------------------------------------------------
+    if "=" in stmt_no_eq:
         try:
-            lhs, rhs = stmt_no_eq.split('=', 1)
-            # remove common trailing annotations like 'for x!=1' to help parsing
-            lhs_clean = re.sub(r"\\text\{[^}]*\}", "", lhs).strip()
-            rhs_clean = re.sub(r"\\text\{[^}]*\}", "", rhs).strip()
-            rhs_clean = re.sub(r"for\s+.*$", "", rhs_clean).strip()
-            from sympy.parsing.sympy_parser import parse_expr, standard_transformations, implicit_multiplication_application, convert_xor
-            transforms = standard_transformations + (implicit_multiplication_application, convert_xor)
-            sym_lhs = parse_expr(lhs_clean, transformations=transforms)
-            sym_rhs = parse_expr(rhs_clean, transformations=transforms)
-            diff = sp.simplify(sym_lhs - sym_rhs)
-            if diff == 0 or (hasattr(diff, 'equals') and diff.equals(0)):
-                debug = f"LOCAL EQUALITY: {lhs_clean} == {rhs_clean} (simplified to 0)"
-                return True, debug
+            lhs, rhs = stmt_no_eq.split("=", 1)
+
+            lhs = lhs.strip()
+            rhs = rhs.strip()
+
+            # remove latex wrappers
+            lhs = lhs.replace("\\cdot", "*")
+            rhs = rhs.replace("\\cdot", "*")
+
+            # handle limits specially
+            if "\\lim" in lhs or "\\lim" in rhs:
+                lhs_val, _ = normalize_and_compute(lhs)
+                rhs_val, _ = normalize_and_compute(rhs)
+
+                if lhs_val is not None and rhs_val is not None:
+                    if abs(lhs_val - rhs_val) < 1e-6:
+                        return True, f"LOCAL LIMIT EQUALITY: {lhs_val} == {rhs_val}"
+
+            else:
+                from sympy.parsing.sympy_parser import (
+                    parse_expr,
+                    standard_transformations,
+                    implicit_multiplication_application,
+                    convert_xor,
+                )
+
+                transforms = standard_transformations + (
+                    implicit_multiplication_application,
+                    convert_xor,
+                )
+
+                lhs_expr = parse_expr(lhs, transformations=transforms)
+                rhs_expr = parse_expr(rhs, transformations=transforms)
+
+                diff = sp.simplify(lhs_expr - rhs_expr)
+
+                if diff == 0:
+                    return True, f"LOCAL EQUALITY VERIFIED: {lhs} == {rhs}"
+
         except Exception:
-            # fall through to normal numeric/limit verification
             pass
 
     # First try improved local normalization/evaluation (handles LaTeX limits etc.)
@@ -234,24 +259,43 @@ def verify_claim(statement: str, expected=None):
     wolfram_input = normalized_input or stmt_no_eq or statement
     wolfram_output = wolfram_compute(wolfram_input)
 
-    # If Wolfram explicitly failed to understand the input, treat as unverified
     if not wolfram_output:
         return False, wolfram_output
+
     low = wolfram_output.lower()
-    if 'could not understand' in low or 'did not understand' in low or "couldn't understand" in low:
+
+    if (
+        'could not understand' in low
+        or 'did not understand' in low
+        or "couldn't understand" in low
+    ):
         return False, wolfram_output
 
+    # NEW: accept algebraic equalities Wolfram verified
+    if "\nResult:\nTrue" in wolfram_output:
+        return True, wolfram_output
+
     computed_value = extract_numeric(wolfram_output)
+
     if computed_value is None:
         return False, wolfram_output
 
     # normalize expected if it's a freeform string (like the long justification)
     expected_num = extract_expected_number(expected)
-    if expected_num is None:
-        # if no numeric expectation provided, return whether we could compute a value
-        return True, wolfram_output
+    if stmt_provided_num is not None:
+        return (
+            abs(float(local_val) - float(stmt_provided_num)) < 1e-6,
+            debug_str,
+        )
 
-    try:
-        return abs(computed_value - float(expected_num)) < 1e-6, wolfram_output
-    except Exception:
-        return False, wolfram_output
+    if expected_num is None:
+        return True, debug_str
+
+    # only compare to expected answer when claim itself is a final answer
+    if "\\lim" in statement and "=" in statement:
+        return (
+            abs(float(local_val) - float(expected_num)) < 1e-6,
+            debug_str,
+        )
+
+    return True, debug_str
