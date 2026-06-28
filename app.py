@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 from llm import LLM
-from wolfram import detect_math_question
 
 app = Flask(__name__)
 cors = CORS(app, resources={r"/*": {"origins": "*"}})
@@ -146,28 +145,7 @@ def generate_short_ans_score():
 
         result = llm.generate_mathematical_claims(question, expected_answer, student_answer)
 
-        combined_text = " ".join([question or "", expected_answer or "", student_answer or ""]).lower()
-        programming_keywords = [
-            "program",
-            "pseudocode",
-            "if statement",
-            "if condition",
-            "boolean",
-            "true",
-            "false",
-            "print",
-            "return",
-            "display",
-        ]
-        is_programming_question = any(keyword in combined_text for keyword in programming_keywords)
-        is_math_question = (
-            not is_programming_question
-            and (
-                result.get("is_math_question", False) or detect_math_question(
-            question, expected_answer=expected_answer, student_answer=student_answer
-                )
-            )
-        )
+        is_math_question = result.get("is_math_question", False)
 
         claims = result.get("claims", [])
         methods_used = result.get("methods_used", [])
