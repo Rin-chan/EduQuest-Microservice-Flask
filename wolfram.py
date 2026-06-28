@@ -1,49 +1,13 @@
 import sympy as sp
 import os
-
-def detect_math_question(question, expected_answer=None, student_answer=None):
-    import re
-    text = " ".join(filter(None, [question or "", expected_answer or "", student_answer or ""]))
-    text = text.lower()
-    math_keywords = [
-        r"\\lim",
-        r"\\int",
-        r"\\sum",
-        r"\\sqrt",
-        r"\\frac",
-        "limit",
-        "derivative",
-        "integral",
-        "polynomial",
-        "equation",
-        "solve",
-        "compute",
-        "evaluate",
-        "function",
-        "matrix",
-        "vector",
-        "algebra",
-        "calculus",
-        "trigonometric",
-        "logarithm",
-        "exponential",
-    ]
-    if any(keyword in text for keyword in math_keywords):
-        return True
-    if re.search(r"\b\d+\s*[\+\-\*/\^]\s*\d+\b", text):
-        return True
-    return False
+import re
+import requests
 
 def wolfram_compute(expr: str):
     """
     Uses Wolfram LLM API as a calculator.
     Returns raw text result.
     """
-
-    try:
-        import requests
-    except Exception as e:
-        return f"WOLFRAM ERROR: requests not installed ({e})"
 
     app_id = os.getenv("WOLFRAM_ALPHA_APP_ID")
     url = (
@@ -65,7 +29,6 @@ def extract_numeric(text):
     """
     Try extracting a number from Wolfram output.
     """
-    import re
     nums = re.findall(r"-?\d+\.?\d*", text)
     return float(nums[-1]) if nums else None
 
@@ -79,7 +42,6 @@ def extract_expected_number(expected_text):
         return None
     if isinstance(expected_text, (int, float)):
         return float(expected_text)
-    import re
     nums = re.findall(r"-?\d+\.?\d*", expected_text)
     return float(nums[-1]) if nums else None
 
@@ -89,37 +51,140 @@ def normalize_and_compute(statement: str):
     Tries multiple strategies: LaTeX cleanup, caret-to-**, simplify/cancel, and symbolic limit evaluation.
     Returns (value or None, normalized_expr or None)
     """
-    import re
-    from sympy.parsing.sympy_parser import (
-        parse_expr,
-        standard_transformations,
-        implicit_multiplication_application,
-        convert_xor,
-    )
-
-    transforms = standard_transformations + (
-        implicit_multiplication_application,
-        convert_xor,
-    )
-
     if not statement:
         return None, None
 
+    if any(tok in statement for tok in ["<=", ">=", "<", ">", "\\le", "\\ge", "\\leq", "\\geq"]):
+        try:
+            from sympy.parsing.sympy_parser import (
+                parse_expr,
+                standard_transformations,
+                implicit_multiplication_application,
+                convert_xor,
+            )
+
+            transforms = standard_transformations + (
+                implicit_multiplication_application,
+                convert_xor,
+            )
+
+            s = statement
+
+            # Normalize LaTeX
+            s = s.replace("\\leq", "<=")
+            s = s.replace("\\geq", ">=")
+            s = s.replace("\\le", "<=")
+            s = s.replace("\\ge", ">=")
+
+            s = s.replace("\\cdot", "*")
+            s = s.replace("\\times", "*")
+            s = s.replace("\\sin", "sin")
+            s = s.replace("\\cos", "cos")
+            s = s.replace("\\tan", "tan")
+            s = s.replace("\\ln", "log")
+            s = s.replace("^", "**")
+
+            s = re.sub(r"\|([^|]+)\|", r"Abs(\1)", s)
+
+            s = s.replace("\\text", "")
+            s = s.replace("{", "")
+            s = s.replace("}", "")
+            s = " ".join(s.split())
+
+            operator = None
+
+            if "<=" in s:
+                operator = "<="
+            elif ">=" in s:
+                operator = ">="
+            elif "<" in s:
+                operator = "<"
+            elif ">" in s:
+                operator = ">"
+
+            if operator is not None:
+
+                parts = [p.strip() for p in s.split(operator)]
+
+                if len(parts) == 3:
+
+                    left = parse_expr(parts[0], transformations=transforms)
+                    middle = parse_expr(parts[1], transformations=transforms)
+                    right = parse_expr(parts[2], transformations=transforms)
+
+                    if operator == "<=":
+                        ok = (
+                            sp.simplify(left <= middle) == True and
+                            sp.simplify(middle <= right) == True
+                        )
+
+                    elif operator == ">=":
+                        ok = (
+                            sp.simplify(left >= middle) == True and
+                            sp.simplify(middle >= right) == True
+                        )
+
+                    elif operator == "<":
+                        ok = (
+                            sp.simplify(left < middle) == True and
+                            sp.simplify(middle < right) == True
+                        )
+
+                    else:
+                        ok = (
+                            sp.simplify(left > middle) == True and
+                            sp.simplify(middle > right) == True
+                        )
+
+                    if ok:
+                        return True, "LOCAL INEQUALITY VERIFIED"
+
+                elif len(parts) == 2:
+
+                    left = parse_expr(parts[0], transformations=transforms)
+                    right = parse_expr(parts[1], transformations=transforms)
+
+                    if operator == "<=":
+                        ok = sp.simplify(left <= right) == True
+
+                    elif operator == ">=":
+                        ok = sp.simplify(left >= right) == True
+
+                    elif operator == "<":
+                        ok = sp.simplify(left < right) == True
+
+                    else:
+                        ok = sp.simplify(left > right) == True
+
+                    if ok:
+                        return True, "LOCAL INEQUALITY VERIFIED"
+
+        except Exception:
+            pass
+
     s = statement
     # Convert common LaTeX constructs
+    s = s.replace("\\dfrac", "\\frac")
     s = re.sub(r"\\frac\{([^}]*)\}\{([^}]*)\}", r"(\1)/(\2)", s)
     s = re.sub(r"\\\(|\\\)", "", s)
     s = s.replace('\\to', 'to').replace('->', 'to')
     s = s.replace('\\', '')
     s = s.replace('^', '**')
+    s = re.sub(r"\|([^|]+)\|", r"Abs(\1)", s)
     s = s.replace('$', '')
 
     # Try to detect limit forms
-    m = re.search(r"lim_?\{?\s*([a-zA-Z]+)\s*(?:to|->)\s*([^\}\)\s]+)\}?\s*(?:\(?\s*)?(.*)", s, flags=re.IGNORECASE)
+    m = re.search(
+        r"(?:lim_?\{?\s*([a-zA-Z]+)\s*(?:to|->|→)\s*([^\}\)\s]+)\}?|"
+        r"lim\s*\(?\s*([a-zA-Z]+)\s*(?:to|->|→)\s*([^\)\s]+)\)?)\s*(.*)",
+        s,
+        flags=re.IGNORECASE,
+    )
+
     if m:
-        var = m.group(1)
-        point = m.group(2)
-        expr = m.group(3).strip()
+        var = m.group(1) or m.group(3)
+        point = m.group(2) or m.group(4)
+        expr = m.group(5).strip()
         # If the regex consumed a leading '(', we may end up with an unmatched trailing ')'.
         # Rebalance by prepending '(' when needed so sympy can parse correctly.
         if expr.startswith('(') and expr.endswith(')'):
@@ -174,6 +239,8 @@ def verify_claim(statement: str, expected=None):
     Checks if the claim's stated answer (if any) matches the computation.
     """
 
+    debug_str = ""
+    
     import re
     # Extract the number stated in the claim itself (e.g., "=20" or "=39")
     stmt_eq_match = re.search(r"=\s*(-?\d+\.?\d*)\s*$", statement)
@@ -184,55 +251,11 @@ def verify_claim(statement: str, expected=None):
     # Strip trailing '= number' from statement before normalization (e.g. '\lim...)=39')
     stmt_no_eq = re.sub(r"\s*=\s*-?\d+\.?\d*\s*$", "", statement)
 
-    # --------------------------------------------------
-    # Symbolic equality verification
-    # --------------------------------------------------
-    if "=" in stmt_no_eq:
-        try:
-            lhs, rhs = stmt_no_eq.split("=", 1)
-
-            lhs = lhs.strip()
-            rhs = rhs.strip()
-
-            # remove latex wrappers
-            lhs = lhs.replace("\\cdot", "*")
-            rhs = rhs.replace("\\cdot", "*")
-
-            # handle limits specially
-            if "\\lim" in lhs or "\\lim" in rhs:
-                lhs_val, _ = normalize_and_compute(lhs)
-                rhs_val, _ = normalize_and_compute(rhs)
-
-                if lhs_val is not None and rhs_val is not None:
-                    if abs(lhs_val - rhs_val) < 1e-6:
-                        return True, f"LOCAL LIMIT EQUALITY: {lhs_val} == {rhs_val}"
-
-            else:
-                from sympy.parsing.sympy_parser import (
-                    parse_expr,
-                    standard_transformations,
-                    implicit_multiplication_application,
-                    convert_xor,
-                )
-
-                transforms = standard_transformations + (
-                    implicit_multiplication_application,
-                    convert_xor,
-                )
-
-                lhs_expr = parse_expr(lhs, transformations=transforms)
-                rhs_expr = parse_expr(rhs, transformations=transforms)
-
-                diff = sp.simplify(lhs_expr - rhs_expr)
-
-                if diff == 0:
-                    return True, f"LOCAL EQUALITY VERIFIED: {lhs} == {rhs}"
-
-        except Exception:
-            pass
-
     # First try improved local normalization/evaluation (handles LaTeX limits etc.)
     local_val, normalized_input = normalize_and_compute(stmt_no_eq)
+    if isinstance(local_val, bool):
+        return local_val, normalized_input
+
     if local_val is not None:
         # If the claim provides a specific number, verify against that; else use expected_answer
         if stmt_provided_num is not None:
@@ -271,7 +294,7 @@ def verify_claim(statement: str, expected=None):
     ):
         return False, wolfram_output
 
-    # NEW: accept algebraic equalities Wolfram verified
+    # Accept algebraic equalities
     if "\nResult:\nTrue" in wolfram_output:
         return True, wolfram_output
 
@@ -280,22 +303,35 @@ def verify_claim(statement: str, expected=None):
     if computed_value is None:
         return False, wolfram_output
 
-    # normalize expected if it's a freeform string (like the long justification)
-    expected_num = extract_expected_number(expected)
+    # If the statement itself supplied a numeric answer (=39, =2, etc.)
     if stmt_provided_num is not None:
+        # Prefer local computation if available
+        if local_val is not None:
+            return (
+                abs(local_val - stmt_provided_num) < 1e-6,
+                debug_str,
+            )
+
+        # Otherwise compare Wolfram's numeric result
         return (
-            abs(float(local_val) - float(stmt_provided_num)) < 1e-6,
-            debug_str,
+            abs(computed_value - stmt_provided_num) < 1e-6,
+            wolfram_output,
         )
 
-    if expected_num is None:
-        return True, debug_str
+    # Compare against expected answer only if one exists
+    expected_num = extract_expected_number(expected)
 
-    # only compare to expected answer when claim itself is a final answer
-    if "\\lim" in statement and "=" in statement:
+    if expected_num is not None:
+        if local_val is not None:
+            return (
+                abs(local_val - expected_num) < 1e-6,
+                debug_str,
+            )
+
         return (
-            abs(float(local_val) - float(expected_num)) < 1e-6,
-            debug_str,
+            abs(computed_value - expected_num) < 1e-6,
+            wolfram_output,
         )
 
-    return True, debug_str
+    # Nothing numeric to compare against, but computation succeeded
+    return True, debug_str if debug_str else wolfram_output

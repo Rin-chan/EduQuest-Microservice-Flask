@@ -504,20 +504,59 @@ class LLM:
             Use the verified claims as factual evidence.
 
             If is_math_question, math questions:
-            - Correctness is most important.
-            - Mathematical justification should increase the score.
-            - Missing justification should reduce the score.
-            - Incorrect reasoning should reduce the score.
-            - A correct final answer with no explanation should receive partial credit.
+            You are grading undergraduate mathematics.
+
+            Evaluate the student's work using these criteria.
+
+            1. Mathematical correctness (0-4)
+            2. Reasoning and justification (0-3)
+            3. Completeness (0-2)
+            4. Mathematical clarity (0-1)
+
+            Verified claims are supporting evidence.
+
+            IMPORTANT:
+
+            Verified claims help detect factual errors.
+
+            DO NOT deduct marks simply because an intermediate claim was not automatically verified.
+
+            If the student's mathematical reasoning is correct overall, award full credit even if some intermediate statements could not be verified automatically.
+
+            Only deduct marks for:
+
+            - incorrect mathematics
+            - invalid logical reasoning
+            - missing important justification
+            - incomplete proof
 
             If not is_math_question, non-math questions:
-            - Evaluate correctness, completeness, relevance, and clarity.
+            10:
+            - Correct answer with complete reasoning or explanation.
+
+            8-9:
+            - Correct answer with a brief explanation.
+
+            5-7:
+            - Correct final answer but little or no explanation.
+
+            2-4:
+            - Partially correct answer or incomplete reasoning.
+
+            0-1:
+            - Incorrect answer.
 
             Return:
             {{
             "score": 0-10,
             "max_score": 10,
-            "breakdown": [...]
+            "breakdown": [
+                {{
+                    "statement": "...",
+                    "points": integer,
+                    "reason": "..."
+                }}
+            ]
             }}
                                                     
             Is math question: {is_math_question}
@@ -544,7 +583,6 @@ class LLM:
 
         # Validate LLM output and enforce hard guards for obvious rule violations.
         score = parsed.get('score', 0)
-        print("[Generate Score Answer] RAW SCORE:", parsed.get("score"))
         breakdown = parsed.get('breakdown', []) or []
 
         # Normalize and validate types
@@ -553,138 +591,35 @@ class LLM:
         except Exception:
             score = 0
 
-        # Ensure breakdown length matches number of claims; if not, rebuild deterministically
-        if len(breakdown) != len(evidence):
-            # Fallback: produce a safe breakdown using unverified/verified flags
-            safe_bd = []
-            for ev in evidence:
-                safe_bd.append({
-                    'statement': ev['statement'],
-                    'verified': bool(ev['verified']),
-                    'wolfram': ev.get('wolfram'),
-                    'points': 0 if not ev['verified'] else 4,
-                    'reason': 'fallback breakdown' if ev['verified'] else 'unverified',
-                })
-            breakdown = safe_bd
-
-        # Enforce: unverified claims must have 0 points
-        for i, ev in enumerate(evidence):
-            if not ev['verified']:
-                if breakdown[i].get('points', 0) != 0:
-                    breakdown[i]['points'] = 0
-                    breakdown[i]['reason'] = 'unverified (enforced)'
-
-        strict_kw = [k.lower() for k in ['polynomial', 'polynomials', 'continuous', 'continuity']]
-        general_kw = [k.lower() for k in [
-            'direct substitution',
-            'directly substitute',
-            'substitute',
-            'substitution',
-            'term by term',
-            'sum law',
-            'difference law',
-            'power law',
-            'constant multiple law',
-            'limit law',
-            'limit laws'
-        ]]
-        plug_in_kw = [k.lower() for k in ['plug in', 'plugging in', 'plugging', 'plugged in']]
-        incorrect_kw = [k.lower() for k in ['squeeze', 'squeeze theorem', 'bounded']]
-        methods_text = (student_answer or '').lower()
-
-        for i, ev in enumerate(evidence):
-            if not ev['verified']:
-                continue
-            
-            # Determine allowed range based on keywords (new mapping)
-            # For verified claims with good methods, give them credit towards the higher end.
-            min_allowed = 2
-            max_allowed = 10  # default: any verified claim can theoretically get up to 10
-            
-            if any(k in methods_text for k in strict_kw):
-                # Strict keywords (continuous, polynomial): range [8, 10]
-                min_allowed = 8
-                max_allowed = 10
-            elif any(k in methods_text for k in general_kw):
-                # General keywords (substitute, direct substitution): range [7, 9]
-                # Verified answer with concrete method deserves high credit (just below strict theory)
-                min_allowed = 7
-                max_allowed = 9
-            elif any(k in methods_text for k in plug_in_kw):
-                # Plug-in keywords: range [4, 6]
-                min_allowed = 4
-                max_allowed = 6
-            else:
-                import re
-                sa_stripped = methods_text.strip()
-                numeric_only = bool(re.fullmatch(r"-?\d+(?:\.\d+)?", sa_stripped)) or (
-                    len(sa_stripped) <= 6 and bool(re.fullmatch(r"[\d\s\-\+\*/\.()]+", sa_stripped))
-                )
-                if numeric_only:
-                    # Numeric only but verified: range [5, 6] (deserves credit for correct answer)
-                    min_allowed = 5
-                    max_allowed = 6
-                elif any(k in methods_text for k in incorrect_kw):
-                    # Incorrect methods: range [0, 2]
-                    min_allowed = 0
-                    max_allowed = 2
-                else:
-                    # Fallback: range [1, 3]
-                    min_allowed = 1
-                    max_allowed = 3
-
-            try:
-                llm_points = int(breakdown[i].get('points', 0))
-            except Exception:
-                llm_points = 0
-            
-            # Enforce range: clip LLM score to [min_allowed, max_allowed]
-            original_points = llm_points
-            clamped_points = max(min_allowed, min(llm_points, max_allowed))
-            
-            # Always update points and reason if there's a mismatch (including boosting low scores)
-            breakdown[i]['points'] = clamped_points
-            if clamped_points != original_points:
-                old_reason = breakdown[i].get('reason', '')
-                breakdown[i]['reason'] = f"{old_reason} (validator: clamped {original_points} to [{min_allowed}, {max_allowed}])"
-            elif min_allowed > 0:
-                # Even if no clamping needed, annotate the validator range for clarity
-                old_reason = breakdown[i].get('reason', '')
-                breakdown[i]['reason'] = f"{old_reason} (validator range: [{min_allowed}, {max_allowed}])"
-
-        # Only enforce score=0 if nothing verified
-        if is_math_question:
-            any_verified = any(
-                ev.get("verified", False)
-                for ev in evidence
-            )
-
-            if not any_verified:
-                score = 0
-
         # Clamp to valid range
-        score = max(0, min(10, int(score)))
-        print(f"[Generate Score Answer] Actual Score:{score}")
+        score = max(0, min(10, score))
+        print(f"[Generate Score Answer] Score: {score}")
 
         return int(score), breakdown
     
     def generate_mathematical_claims(self, question, expected_answer, student_answer):
         prompt = PromptTemplate.from_template("""
-            You extract VERIFIABLE mathematical claims from a student answer.
+            You extract only the key mathematical claims needed to judge correctness.
 
-            IMPORTANT: 
-            - Extract only concrete claims that CAN be verified by computation (limits, equations, computed values)
-            - DO NOT extract purely theoretical/justification statements like:
-            * "polynomials are continuous"
-            * "limit laws apply"
-            * "the function is continuous"
-            * "by squeeze theorem"
-            * Any statement that cannot be directly evaluated mathematically
-            - Only extract: specific limit evaluations, equations with values, step-by-step calculations
+            Extract:
+            - Final numerical answers.
+            - Final limit evaluations.
+            - Final derivatives or integrals.
+            - Final algebraic identities.
+            - Important inequalities used in the proof (only if they are central).
+
+            DO NOT extract:
+            - Generic theorem names.
+            - Generic mathematical facts.
+            - Explanatory sentences.
+            - Every intermediate algebraic manipulation.
+
+            The goal is to extract at most 3–5 important verifiable claims, not every sentence.
 
             Return STRICT JSON:
 
             {{
+            "is_math_question": true,
             "claims": [
                 {{
                 "statement": "verifiable expression or equation (e.g., '\\\\lim_{{x\\\\to 5}}(...)=39' or '2(5)^2-3(5)+4=39')",
